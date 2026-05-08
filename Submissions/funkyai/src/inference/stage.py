@@ -128,7 +128,7 @@ def _generate(
 
 
 def _parse_mc_options(prompt: str) -> list[tuple[str, str]]:
-    matches = re.findall(r"(?m)^([A-D])\)\s*(.+)$", prompt)
+    matches = re.findall(r"(?m)^([A-E])\)\s*(.+)$", prompt)
     return [(letter, text.strip()) for letter, text in matches]
 
 
