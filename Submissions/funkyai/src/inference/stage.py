@@ -4,7 +4,11 @@ import argparse
 import contextlib
 import io
 import logging
+import os
 import re
+import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +18,74 @@ from transformers import AutoTokenizer
 from src.inference.model import CausalTransformerLM, resolve_device, set_seed
 
 
-def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+REMOTE_CHECKPOINT_URL = "https://pub-331934def20c42cea813b6434c78a240.r2.dev/model_final_sftv3.pt"
+
+
+def _is_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _read_checkpoint_locator(checkpoint_path: Path) -> str | None:
+    if checkpoint_path.suffix.lower() not in {".url", ".txt"}:
+        return None
+    content = checkpoint_path.read_text(encoding="utf-8").strip()
+    return content or None
+
+
+def _download_to_cache(url: str, cache_root: Path) -> Path:
+    parsed = urllib.parse.urlparse(url)
+    filename = Path(parsed.path).name or "checkpoint.pt"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    target_path = cache_root / filename
+    if target_path.exists():
+        return target_path
+
+    fd, temp_path_str = tempfile.mkstemp(
+        prefix=f"{filename}.",
+        suffix=".tmp",
+        dir=str(cache_root),
+    )
+    os.close(fd)
+    temp_path = Path(temp_path_str)
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "*/*",
+            },
+        )
+        with urllib.request.urlopen(request) as response, temp_path.open("wb") as dst:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+        temp_path.replace(target_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return target_path
+
+
+def _resolve_checkpoint_path(checkpoint_path: str | Path) -> Path:
+    raw_value = str(checkpoint_path).strip()
+    if _is_url(raw_value):
+        return _download_to_cache(raw_value, Path(".model_cache"))
+
+    path = Path(raw_value)
+    locator = _read_checkpoint_locator(path) if path.exists() else None
+    if locator:
+        if not _is_url(locator):
+            raise ValueError(f"Checkpoint locator file must contain an HTTP(S) URL: {path}")
+        return _download_to_cache(locator, path.parent / ".model_cache")
+
+    return path
+
+
+def _load_checkpoint_payload(checkpoint_path: str | Path) -> dict[str, Any]:
+    checkpoint_path = _resolve_checkpoint_path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
 
@@ -215,7 +286,7 @@ def main(
     set_seed(seed)
     resolved_device = resolve_device(device)
 
-    payload = _load_checkpoint_payload(Path(checkpoint_path))
+    payload = _load_checkpoint_payload(checkpoint_path)
     tokenizer_name = payload["tokenizer"].get("name")
     if not tokenizer_name:
         raise ValueError("Checkpoint tokenizer metadata must include 'name'")
